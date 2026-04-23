@@ -48,6 +48,11 @@ cp .env.example .env
 Generation runs through the `claude` CLI in headless (`-p`) mode, using whatever
 plan you're already signed into. No separate `ANTHROPIC_API_KEY` needed.
 
+> If you want the original Anthropic-SDK path (API key only, no local CLI login,
+> suitable for CI runners and headless containers), use upstream
+> [`shuvonsec/public-skills-builder`](https://github.com/shuvonsec/public-skills-builder)
+> instead. This fork is CLI-only on purpose.
+
 ---
 
 ## Sources

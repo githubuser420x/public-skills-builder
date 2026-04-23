@@ -420,7 +420,18 @@ Write the skill in clean markdown. No preamble. Start directly with ## Crown Jew
 """
 
 
-CLI_TIMEOUT_SECONDS = int(os.getenv("CLI_TIMEOUT_SECONDS", "600"))
+RATE_LIMIT_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "too many requests",
+    "429",
+)
+
+
+def _cli_timeout() -> int:
+    """Read CLI_TIMEOUT_SECONDS at call time so .env overrides (loaded in main) take effect."""
+    return int(os.getenv("CLI_TIMEOUT_SECONDS", "600"))
 
 
 def generate_skill(vuln_class: str, reports: list[dict]) -> str:
@@ -451,13 +462,15 @@ def generate_skill(vuln_class: str, reports: list[dict]) -> str:
         reports=report_text,
     )
 
+    timeout = _cli_timeout()
+
     for attempt in range(3):
         try:
             result = subprocess.run(
                 ["claude", "-p", prompt],
                 capture_output=True,
                 text=True,
-                timeout=CLI_TIMEOUT_SECONDS,
+                timeout=timeout,
             )
         except subprocess.TimeoutExpired:
             print(f"[*] CLI timeout on attempt {attempt + 1}, retrying...")
@@ -469,11 +482,19 @@ def generate_skill(vuln_class: str, reports: list[dict]) -> str:
 
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout
+
+        stderr = result.stderr.strip()
+        hit_rate_limit = any(m in stderr.lower() for m in RATE_LIMIT_MARKERS)
         print(
             f"[!] CLI exited {result.returncode} "
-            f"(attempt {attempt + 1}): {result.stderr.strip()[:300]}"
+            f"(attempt {attempt + 1}): {stderr[:300]}"
         )
-        time.sleep(5 * (attempt + 1))
+        if hit_rate_limit:
+            wait = 120 * (attempt + 1)
+            print(f"[*] Rate/quota signal detected, backing off {wait}s...")
+            time.sleep(wait)
+        else:
+            time.sleep(5 * (attempt + 1))
 
     return f"# {vuln_class}\n\n*Generation failed. Try again.*\n"
 

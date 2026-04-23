@@ -31,16 +31,22 @@ No private reports required. Everything comes from public data.
 ## Quick Start
 
 ```bash
-git clone https://github.com/shuvonsec/public-skills-builder
+git clone https://github.com/githubuser420x/public-skills-builder
 cd public-skills-builder
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install anthropic requests
+pip install requests
+
+# Make sure the Claude Code CLI is installed and logged in:
+claude --version
 
 cp .env.example .env
-# Edit .env — add your ANTHROPIC_API_KEY
+# .env is only needed for optional H1_API_KEY / GITHUB_TOKEN
 ```
+
+Generation runs through the `claude` CLI in headless (`-p`) mode, using whatever
+plan you're already signed into. No separate `ANTHROPIC_API_KEY` needed.
 
 ---
 
@@ -84,7 +90,7 @@ Each skill file contains:
 ## Usage
 
 ```bash
-# Public GitHub writeups only (just needs Claude API key)
+# Public GitHub writeups only
 python3 public_skills_builder.py --source github
 
 # HackerOne public disclosed reports (no H1 key needed)
@@ -98,6 +104,9 @@ python3 public_skills_builder.py --vuln-type idor ssrf xss oauth
 
 # Specific H1 program
 python3 public_skills_builder.py --source h1 --program shopify --limit 200
+
+# Override the per-skill CLI timeout (default 600s)
+CLI_TIMEOUT_SECONDS=900 python3 public_skills_builder.py
 ```
 
 ---
@@ -126,9 +135,10 @@ Or copy skill files into your Claude Code project's `.claude/` directory so they
 ## Requirements
 
 - Python 3.10+
-- `ANTHROPIC_API_KEY` — from [console.anthropic.com](https://console.anthropic.com)
+- [Claude Code CLI](https://claude.com/product/claude-code) on `$PATH` and signed in
 - `H1_API_KEY` — optional, from [hackerone.com/settings/api_token](https://hackerone.com/settings/api_token)
 - `GITHUB_TOKEN` — optional, increases GitHub API rate limits
+- `CLI_TIMEOUT_SECONDS` — optional, per-skill CLI timeout in seconds (default 600)
 
 ---
 

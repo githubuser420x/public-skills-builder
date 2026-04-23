@@ -17,27 +17,22 @@ Usage:
 import os
 import re
 import sys
-import json
 import time
+import shutil
 import argparse
+import subprocess
 import textwrap
 import requests
 from pathlib import Path
 from collections import defaultdict
-
-try:
-    import anthropic
-except ImportError:
-    print("[!] Missing: pip install anthropic requests")
-    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
-H1_API_BASE   = "https://api.hackerone.com/v1"
-H1_WEB_GQL    = "https://hackerone.com/graphql"
+H1_API_BASE = "https://api.hackerone.com/v1"
+H1_WEB_GQL = "https://hackerone.com/graphql"
 
 GITHUB_WRITEUP_REPOS = [
     # (owner, repo, path_to_writeups_list_or_readme)
@@ -47,30 +42,53 @@ GITHUB_WRITEUP_REPOS = [
 ]
 
 VULN_KEYWORDS = {
-    "idor":            ["idor", "insecure direct object", "broken access control", "horizontal privilege"],
-    "ssrf":            ["ssrf", "server-side request forgery", "internal metadata"],
-    "xss":             ["xss", "cross-site scripting", "stored xss", "reflected xss", "dom xss"],
-    "sqli":            ["sql injection", "sqli", "blind sql", "error-based sql"],
-    "rce":             ["rce", "remote code execution", "command injection", "code execution"],
-    "auth-bypass":     ["authentication bypass", "auth bypass", "2fa bypass", "mfa bypass"],
-    "oauth":           ["oauth", "oidc", "jwt", "pkce", "token theft", "open redirect"],
-    "race-condition":  ["race condition", "toctou", "double-spend", "concurrent"],
-    "business-logic":  ["business logic", "price manipulation", "logic flaw", "workflow bypass"],
-    "graphql":         ["graphql", "introspection", "batching", "alias bypass"],
-    "cache-poison":    ["cache poison", "cache deception", "web cache"],
-    "xxe":             ["xxe", "xml external entity", "xml injection"],
-    "upload":          ["file upload", "unrestricted upload", "webshell", "path traversal"],
-    "ssti":            ["ssti", "server-side template", "template injection"],
-    "csrf":            ["csrf", "cross-site request forgery"],
-    "subdomain":       ["subdomain takeover", "dangling dns", "cname takeover"],
-    "llm-ai":          ["prompt injection", "llm", "ai chatbot", "indirect injection", "ascii smuggling"],
-    "crypto":          ["timing attack", "hmac", "signature bypass", "weak crypto", "replay attack"],
+    "idor": [
+        "idor",
+        "insecure direct object",
+        "broken access control",
+        "horizontal privilege",
+    ],
+    "ssrf": ["ssrf", "server-side request forgery", "internal metadata"],
+    "xss": ["xss", "cross-site scripting", "stored xss", "reflected xss", "dom xss"],
+    "sqli": ["sql injection", "sqli", "blind sql", "error-based sql"],
+    "rce": ["rce", "remote code execution", "command injection", "code execution"],
+    "auth-bypass": ["authentication bypass", "auth bypass", "2fa bypass", "mfa bypass"],
+    "oauth": ["oauth", "oidc", "jwt", "pkce", "token theft", "open redirect"],
+    "race-condition": ["race condition", "toctou", "double-spend", "concurrent"],
+    "business-logic": [
+        "business logic",
+        "price manipulation",
+        "logic flaw",
+        "workflow bypass",
+    ],
+    "graphql": ["graphql", "introspection", "batching", "alias bypass"],
+    "cache-poison": ["cache poison", "cache deception", "web cache"],
+    "xxe": ["xxe", "xml external entity", "xml injection"],
+    "upload": ["file upload", "unrestricted upload", "webshell", "path traversal"],
+    "ssti": ["ssti", "server-side template", "template injection"],
+    "csrf": ["csrf", "cross-site request forgery"],
+    "subdomain": ["subdomain takeover", "dangling dns", "cname takeover"],
+    "llm-ai": [
+        "prompt injection",
+        "llm",
+        "ai chatbot",
+        "indirect injection",
+        "ascii smuggling",
+    ],
+    "crypto": [
+        "timing attack",
+        "hmac",
+        "signature bypass",
+        "weak crypto",
+        "replay attack",
+    ],
 }
 
 
 # ---------------------------------------------------------------------------
 # Source 1: HackerOne REST API (public disclosed reports)
 # ---------------------------------------------------------------------------
+
 
 def fetch_h1_disclosed(api_key: str, program: str | None, limit: int) -> list[dict]:
     """
@@ -92,11 +110,11 @@ def fetch_h1_disclosed(api_key: str, program: str | None, limit: int) -> list[di
 
     while len(reports) < limit:
         params = {
-            "filter[state][]":     ["resolved"],
-            "filter[disclosed]":   True,
-            "page[size]":          min(100, limit - len(reports)),
-            "page[number]":        page,
-            "sort":                "-created_at",
+            "filter[state][]": ["resolved"],
+            "filter[disclosed]": True,
+            "page[size]": min(100, limit - len(reports)),
+            "page[number]": page,
+            "sort": "-created_at",
         }
         if program:
             params["filter[program][]"] = program
@@ -104,7 +122,10 @@ def fetch_h1_disclosed(api_key: str, program: str | None, limit: int) -> list[di
         try:
             resp = requests.get(
                 f"{H1_API_BASE}/hackers/me/reports",
-                auth=auth, headers=headers, params=params, timeout=15
+                auth=auth,
+                headers=headers,
+                params=params,
+                timeout=15,
             )
         except requests.RequestException as e:
             print(f"[!] H1 API error: {e}")
@@ -127,27 +148,26 @@ def fetch_h1_disclosed(api_key: str, program: str | None, limit: int) -> list[di
 
         for item in data:
             attrs = item.get("attributes", {})
-            rels  = item.get("relationships", {})
-            weakness = (
-                rels.get("weakness", {})
-                    .get("data", {}) or {}
+            rels = item.get("relationships", {})
+            weakness = rels.get("weakness", {}).get("data", {}) or {}
+            severity = rels.get("severity", {}).get("data", {}) or {}
+            reports.append(
+                {
+                    "source": "hackerone",
+                    "id": item.get("id"),
+                    "title": attrs.get("title", ""),
+                    "severity": severity.get("attributes", {}).get("rating", ""),
+                    "weakness": weakness.get("attributes", {}).get("name", ""),
+                    "description": attrs.get("vulnerability_information", ""),
+                    "impact": attrs.get("impact", ""),
+                    "program": rels.get("program", {})
+                    .get("data", {})
+                    .get("attributes", {})
+                    .get("handle", ""),
+                    "url": f"https://hackerone.com/reports/{item.get('id')}",
+                    "disclosed_at": attrs.get("disclosed_at", ""),
+                }
             )
-            severity = (
-                rels.get("severity", {})
-                    .get("data", {}) or {}
-            )
-            reports.append({
-                "source":      "hackerone",
-                "id":          item.get("id"),
-                "title":       attrs.get("title", ""),
-                "severity":    severity.get("attributes", {}).get("rating", ""),
-                "weakness":    weakness.get("attributes", {}).get("name", ""),
-                "description": attrs.get("vulnerability_information", ""),
-                "impact":      attrs.get("impact", ""),
-                "program":     rels.get("program", {}).get("data", {}).get("attributes", {}).get("handle", ""),
-                "url":         f"https://hackerone.com/reports/{item.get('id')}",
-                "disclosed_at": attrs.get("disclosed_at", ""),
-            })
 
         if len(data) < 100:
             break
@@ -161,6 +181,7 @@ def fetch_h1_disclosed(api_key: str, program: str | None, limit: int) -> list[di
 # ---------------------------------------------------------------------------
 # Source 2: HackerOne public hacktivity (no auth needed)
 # ---------------------------------------------------------------------------
+
 
 def fetch_h1_hacktivity(limit: int, program: str | None = None) -> list[dict]:
     """
@@ -176,32 +197,6 @@ def fetch_h1_hacktivity(limit: int, program: str | None = None) -> list[dict]:
 
     print(f"[*] Fetching H1 public hacktivity feed (limit={limit})...")
 
-    query = """
-    query HacktivityFeed($after: String, $program: [String]) {
-      hacktivity: reports(
-        filter: {
-          reporter: [],
-          disclosed_at__lt: "2099-01-01"
-          program: $program
-        }
-        first: 25
-        after: $after
-        order_by: {field: disclosed_at, direction: DESC}
-      ) {
-        pageInfo { hasNextPage endCursor }
-        nodes {
-          id
-          title
-          disclosed_at
-          severity { rating }
-          weakness { name }
-          team { handle name }
-        }
-      }
-    }
-    """
-
-    # Fallback: use the simpler public endpoint
     simple_query = """
     query {
       reports(filter: {reporter: [], disclosed_at__lt: "2099-01-01"}, first: 25) {
@@ -246,18 +241,26 @@ def fetch_h1_hacktivity(limit: int, program: str | None = None) -> list[dict]:
 
         for node in nodes:
             if node.get("disclosed_at"):
-                reports.append({
-                    "source":      "hackerone_public",
-                    "id":          node.get("id"),
-                    "title":       node.get("title", ""),
-                    "severity":    node.get("severity", {}).get("rating", "") if node.get("severity") else "",
-                    "weakness":    node.get("weakness", {}).get("name", "") if node.get("weakness") else "",
-                    "description": "",  # public feed doesn't include body
-                    "impact":      "",
-                    "program":     node.get("team", {}).get("handle", "") if node.get("team") else "",
-                    "url":         f"https://hackerone.com/reports/{node.get('id')}",
-                    "disclosed_at": node.get("disclosed_at", ""),
-                })
+                reports.append(
+                    {
+                        "source": "hackerone_public",
+                        "id": node.get("id"),
+                        "title": node.get("title", ""),
+                        "severity": node.get("severity", {}).get("rating", "")
+                        if node.get("severity")
+                        else "",
+                        "weakness": node.get("weakness", {}).get("name", "")
+                        if node.get("weakness")
+                        else "",
+                        "description": "",  # public feed doesn't include body
+                        "impact": "",
+                        "program": node.get("team", {}).get("handle", "")
+                        if node.get("team")
+                        else "",
+                        "url": f"https://hackerone.com/reports/{node.get('id')}",
+                        "disclosed_at": node.get("disclosed_at", ""),
+                    }
+                )
 
         if not page_info.get("hasNextPage") or not nodes:
             break
@@ -272,6 +275,7 @@ def fetch_h1_hacktivity(limit: int, program: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Source 3: GitHub writeup collections
 # ---------------------------------------------------------------------------
+
 
 def fetch_github_writeups(limit: int) -> list[dict]:
     """
@@ -293,8 +297,7 @@ def fetch_github_writeups(limit: int) -> list[dict]:
             if not resp.ok:
                 # try main branch
                 resp = requests.get(
-                    url.replace("/master/", "/main/"),
-                    headers=headers, timeout=15
+                    url.replace("/master/", "/main/"), headers=headers, timeout=15
                 )
             if not resp.ok:
                 print(f"[!] Could not fetch {owner}/{repo}")
@@ -304,29 +307,41 @@ def fetch_github_writeups(limit: int) -> list[dict]:
 
         content = resp.text
         # Extract markdown links: [title](url)
-        links = re.findall(r'\[([^\]]+)\]\((https?://[^\)]+)\)', content)
+        links = re.findall(r"\[([^\]]+)\]\((https?://[^\)]+)\)", content)
 
         for title, link_url in links:
             if len(reports) >= limit:
                 break
             # Only keep writeup URLs (not repo links or docs)
-            if any(kw in link_url.lower() for kw in [
-                "medium.com", "infosec", "writeup", "hackerone.com/reports",
-                "blog", "notion.so", "github.io", "portswigger", "bugcrowd"
-            ]):
+            if any(
+                kw in link_url.lower()
+                for kw in [
+                    "medium.com",
+                    "infosec",
+                    "writeup",
+                    "hackerone.com/reports",
+                    "blog",
+                    "notion.so",
+                    "github.io",
+                    "portswigger",
+                    "bugcrowd",
+                ]
+            ):
                 vuln_class = classify_report(title, "")
-                reports.append({
-                    "source":      f"github:{owner}/{repo}",
-                    "id":          re.sub(r'[^a-z0-9]', '-', title.lower())[:40],
-                    "title":       title,
-                    "severity":    "",
-                    "weakness":    vuln_class,
-                    "description": f"Public writeup: {title}",
-                    "impact":      "",
-                    "program":     "",
-                    "url":         link_url,
-                    "disclosed_at": "",
-                })
+                reports.append(
+                    {
+                        "source": f"github:{owner}/{repo}",
+                        "id": re.sub(r"[^a-z0-9]", "-", title.lower())[:40],
+                        "title": title,
+                        "severity": "",
+                        "weakness": vuln_class,
+                        "description": f"Public writeup: {title}",
+                        "impact": "",
+                        "program": "",
+                        "url": link_url,
+                        "disclosed_at": "",
+                    }
+                )
 
         print(f"[+] {owner}/{repo}: {len(links)} links found")
         time.sleep(0.3)
@@ -338,6 +353,7 @@ def fetch_github_writeups(limit: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Classification
 # ---------------------------------------------------------------------------
+
 
 def classify_report(title: str, weakness: str) -> str:
     """Map a report to a vuln class based on title + weakness name."""
@@ -404,8 +420,11 @@ Write the skill in clean markdown. No preamble. Start directly with ## Crown Jew
 """
 
 
-def generate_skill(client: anthropic.Anthropic, vuln_class: str, reports: list[dict]) -> str:
-    """Send grouped reports to Claude and get a skill file back."""
+CLI_TIMEOUT_SECONDS = int(os.getenv("CLI_TIMEOUT_SECONDS", "600"))
+
+
+def generate_skill(vuln_class: str, reports: list[dict]) -> str:
+    """Pipe grouped reports through the Claude Code CLI (`claude -p`) and get a skill file back."""
 
     # Build report summaries (no PII/URLs redacted for public reports)
     report_text = ""
@@ -434,33 +453,35 @@ def generate_skill(client: anthropic.Anthropic, vuln_class: str, reports: list[d
 
     for attempt in range(3):
         try:
-            msg = client.messages.create(
-                model="claude-sonnet-4-6",
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
+            result = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=CLI_TIMEOUT_SECONDS,
             )
-            return msg.content[0].text
-        except anthropic.RateLimitError:
-            wait = 30 * (attempt + 1)
-            print(f"[*] Rate limited, waiting {wait}s...")
-            time.sleep(wait)
-        except anthropic.APIError as e:
-            print(f"[!] Claude API error: {e}")
+        except subprocess.TimeoutExpired:
+            print(f"[*] CLI timeout on attempt {attempt + 1}, retrying...")
+            time.sleep(5 * (attempt + 1))
+            continue
+        except FileNotFoundError:
+            print("[!] `claude` command not found. Install the Claude Code CLI.")
             break
+
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout
+        print(
+            f"[!] CLI exited {result.returncode} "
+            f"(attempt {attempt + 1}): {result.stderr.strip()[:300]}"
+        )
+        time.sleep(5 * (attempt + 1))
 
     return f"# {vuln_class}\n\n*Generation failed. Try again.*\n"
 
 
-def write_skill_file(out_dir: Path, vuln_class: str, content: str, report_count: int, sources: list[str]):
+def write_skill_file(
+    out_dir: Path, vuln_class: str, content: str, report_count: int, sources: list[str]
+):
     """Write a skill file with YAML frontmatter."""
-    # Extract a one-liner description from the content
-    first_line = ""
-    for line in content.split("\n"):
-        line = line.strip()
-        if line and not line.startswith("#") and len(line) > 30:
-            first_line = line[:120]
-            break
-
     name = vuln_class.lower().replace(" ", "-").replace("_", "-")
     description = (
         f"Hunting skill for {vuln_class.replace('-', ' ')} vulnerabilities. "
@@ -515,6 +536,7 @@ def write_index(out_dir: Path, skills: list[dict]):
 # Main
 # ---------------------------------------------------------------------------
 
+
 def parse_args():
     p = argparse.ArgumentParser(
         description="Build Claude AI hunting skills from public bug bounty reports",
@@ -534,14 +556,28 @@ def parse_args():
           python public_skills_builder.py --source github --limit 100
         """),
     )
-    p.add_argument("--source", choices=["h1", "h1-public", "github", "all"], default="all")
+    p.add_argument(
+        "--source", choices=["h1", "h1-public", "github", "all"], default="all"
+    )
     p.add_argument("--program", help="H1 program handle (e.g. shopify, hackerone)")
-    p.add_argument("--vuln-type", nargs="+", choices=list(VULN_KEYWORDS.keys()),
-                   help="Only generate skills for these vuln classes")
-    p.add_argument("--limit", type=int, default=500, help="Max reports to fetch (default: 500)")
-    p.add_argument("--out", default="skills", help="Output directory (default: skills/)")
-    p.add_argument("--min-reports", type=int, default=3,
-                   help="Min reports per class to generate a skill (default: 3)")
+    p.add_argument(
+        "--vuln-type",
+        nargs="+",
+        choices=list(VULN_KEYWORDS.keys()),
+        help="Only generate skills for these vuln classes",
+    )
+    p.add_argument(
+        "--limit", type=int, default=500, help="Max reports to fetch (default: 500)"
+    )
+    p.add_argument(
+        "--out", default="skills", help="Output directory (default: skills/)"
+    )
+    p.add_argument(
+        "--min-reports",
+        type=int,
+        default=3,
+        help="Min reports per class to generate a skill (default: 3)",
+    )
     return p.parse_args()
 
 
@@ -560,15 +596,12 @@ def main():
     load_env()
     args = parse_args()
 
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-    if not anthropic_key:
-        print("[!] Set ANTHROPIC_API_KEY in .env or environment")
+    if not shutil.which("claude"):
+        print("[!] `claude` CLI not found on PATH. Install Claude Code.")
         sys.exit(1)
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    client = anthropic.Anthropic(api_key=anthropic_key)
 
     # --- Fetch reports ---
     all_reports: list[dict] = []
@@ -602,29 +635,37 @@ def main():
     if args.vuln_type:
         groups = {k: v for k, v in groups.items() if k in args.vuln_type}
 
-    print(f"[*] Vuln classes found: {', '.join(f'{k}({len(v)})' for k, v in sorted(groups.items(), key=lambda x: -len(x[1])))}")
+    print(
+        f"[*] Vuln classes found: {', '.join(f'{k}({len(v)})' for k, v in sorted(groups.items(), key=lambda x: -len(x[1])))}"
+    )
 
     # --- Generate skills ---
     skills_written = []
     try:
         for vuln_class, reports in sorted(groups.items(), key=lambda x: -len(x[1])):
             if len(reports) < args.min_reports:
-                print(f"[~] Skipping {vuln_class} ({len(reports)} reports < min {args.min_reports})")
+                print(
+                    f"[~] Skipping {vuln_class} ({len(reports)} reports < min {args.min_reports})"
+                )
                 continue
 
             print(f"\n[*] Generating skill: {vuln_class} ({len(reports)} reports)...")
-            content = generate_skill(client, vuln_class, reports)
+            content = generate_skill(vuln_class, reports)
 
             sources = list(set(r["source"].split(":")[0] for r in reports))
-            filepath = write_skill_file(out_dir, vuln_class, content, len(reports), sources)
+            filepath = write_skill_file(
+                out_dir, vuln_class, content, len(reports), sources
+            )
 
-            skills_written.append({
-                "name":    f"hunt-{vuln_class}",
-                "file":    filepath.name,
-                "count":   len(reports),
-                "sources": ", ".join(sources),
-            })
-            time.sleep(1)  # be nice to the API
+            skills_written.append(
+                {
+                    "name": f"hunt-{vuln_class}",
+                    "file": filepath.name,
+                    "count": len(reports),
+                    "sources": ", ".join(sources),
+                }
+            )
+            time.sleep(1)
 
     except KeyboardInterrupt:
         print("\n[*] Interrupted. Saving index for skills generated so far...")
